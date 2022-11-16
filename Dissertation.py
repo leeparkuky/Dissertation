@@ -1,16 +1,28 @@
-import random
+# import pandas
 import pandas as pd
-import numpy as np
+# import scipy
 from scipy.stats import bernoulli
+# import numpy
+import numpy as np
+from numpy.linalg import eig, solve, inv
+from numpy import diag
+# import sklearn
+from sklearn.covariance import EmpiricalCovariance
+from sklearn.datasets import make_gaussian_quantiles
+# import dask
+import dask.dataframe as dd
+import dask.array as da
+from dask.distributed import Client
+
+# import others
+from functools import partial
 from itertools import combinations
 from pprint import pprint
 from tqdm.auto import trange
-from numpy.linalg import eig, solve, inv
-from numpy import diag
-from sklearn.covariance import EmpiricalCovariance
-from sklearn.datasets import make_gaussian_quantiles
+import random
+import os
 
-
+# import numba
 from numba import jit, vectorize, int32, int8
 
 @jit
@@ -81,19 +93,40 @@ def get_order_index(X, by):
 
 
 class RandomGenerator:
-    def __init__(self, p, size, prob_range = (.2, .8), interaction_size = None, use_dask = False):
+    def __init__(self, p, size, order_by = 'cov', prob_range = (.2, .8), interaction_size = None, use_dask = False):
         self.varnum = p
         self.prob_range = prob_range
         self.N = size
         self.rng = random.Random()
         self.numpy_rng = np.random.default_rng()
         self._config = {'p': p, 'sample size': size, 'interactions': {}}
-        self.genBinary
+        if order_by:
+            self.genBinary(order = True, by = order_by)
+        else:
+            self.genBinary(order = False)
         self.validateInteractionSize(interaction_size = interaction_size)
         self.use_dask = use_dask
+        if use_dask:
+            client = Client(n_workers = os.cpu_count(), threads_per_worker = 2)
+            self.dashboard_link = client.dashboard_link
+
         if self.interaction_size:
             self.addInteractionTerms()
 
+    @staticmethod
+    def reorder_data(data, by, columns = None):
+        if isinstance(data, pd.DataFrame):
+            if columns:
+                X = data.loc[:, columns]
+            else:
+                columns = data.columns
+                X = data
+            order_index = get_order_index(X, by = by)
+            new_columns = columns[order_index]
+            data.loc[:, columns] = X.loc[:, new_columns].to_numpy()
+            return data
+        else:
+            raise ValueError("data must be a pandas dataframe")
         
     def validateInteractionSize(self, interaction_size):
         if interaction_size == None:
@@ -107,14 +140,16 @@ class RandomGenerator:
             self.interaction_size = interaction_size
 
     
-    @property
-    def genBinary(self):
+    def genBinary(self, order = False, by = 'cov'):
         p = self.varnum
         prob = [self.rng.uniform(self.prob_range[0], self.prob_range[1]) for x in range(p)]
         self._config['bernoulli parameters'] = {f"X_{i}" : p for i,p in enumerate(prob)}
         dictionary = {f"X_{i}":bernoulli.rvs(probability, size = self.N) for i,probability in enumerate(prob) }
         df = pd.DataFrame(dictionary)
-        self._X = df
+        if order:
+            df = self.reorder_data(df, by = by)
+            print(f"dataset is ordered by {by}")
+        self._X = df.astype(np.byte)
         return df
     
     @property
@@ -141,19 +176,36 @@ class RandomGenerator:
             self._interactions = None
             return None
     
+    @staticmethod
+    def compute_response(series, coefficients):
+        index_1 = series.index[series.eq(1)].tolist()
+        y = 0
+        for i in range(1, len(index_1)+1):
+            if i == 1:
+                for idx in index_1:
+                    y += coefficients[idx]
+            else:
+                interactions = [''.join(x) for x in list(combinations(index_1, i))]
+                for term in interactions:
+                    try:
+                        y += coefficients[term]
+                    except:
+                        pass
+        return y
     
-    def addInteractionTerms(self):
+    
+    def addInteractionTerms(self, use_dask = False):
         try:
-            df = self._X.copy()
+            df = self._X
         except:
-            df = self.genBinary.copy()
+            df = self.genBinary
         try:
             interactions = self._interactions
         except:
             interactions = self.interactions
-
         interaction_all = list(interactions.values())
         N = len(interaction_all)
+        colnames = df.columns.tolist()
         for k in trange(N, leave = False):
             interaction_list = interaction_all[k]
             n = len(interaction_list)
@@ -161,16 +213,17 @@ class RandomGenerator:
                 interaction  = interaction_list[i]
                 p = len(interaction)
                 colname = ''.join(interaction)
-                df[colname] = df.loc[:, interaction].apply(np.prod, axis = 1)
+                if self.use_dask:
+                    colnames.append(colname)
+                else:
+                    colnames.append(colname)
+                    df[colname] = df.loc[:, interaction].apply(np.prod, axis = 1)
+        self.columns = colnames
         self._X_full = df
         return df
     
     def genCoefficients(self, mean = 2, error = 2):
-        try:
-            df = self._X_full.copy()
-        except:
-            df = self.addInteractionTerms().copy()
-        columns = df.columns.tolist()
+        columns = self.columns
         num_var = len(columns)
         abs_beta = [abs(self.rng.gauss(mean, error)) for x in range(num_var)]
         signs =    [x*2 -1 for x in bernoulli.rvs(.5, size = num_var)]
@@ -180,14 +233,55 @@ class RandomGenerator:
         self._config['coefficients'] = dictionary
         return beta
         
-    def genResponse(self, intercept = 5, error = 5):
-        beta = np.array(self.genCoefficients())
-        raw = self._X_full.copy()
-        y = raw.apply(lambda x: beta.dot(x) + self.rng.gauss(intercept, error), axis = 1)
-        self.df = self._X.copy()
-        self.df['y'] = y
-        return self.df
+        
+        
+    def genResponse(self, intercept = 5, error = 5, use_dask = False, save_parquet = None):
+        if use_dask:
+            try:
+                df = self._X
+            except:
+                df = self.genBinary
+            try:
+                interactions = self._interactions
+            except:
+                interactions = self.interactions
+            ddf = dd.from_pandas(df.astype(np.byte), chunksize = 1000)
+            interaction_dict = interactions
+            interactions = []
+            for val in interaction_dict.values():
+                interactions += val
+            try:
+                coef = self._config['coefficients']
+            except:
+                self.genCoefficients()
+                coef = self._config['coefficients']
+                
+            find_y = partial(self.compute_response, coefficients = coef)
+            result = ddf.apply(find_y, axis = 1, meta = (None, 'float64'))
+            result += da.random.normal(loc = intercept, scale = error, size = df.shape[0], chunks = 1000)
+            ddf['y'] = result
+            if save_parquet:
+                dd.to_parquet(df=ddf,path=save_parquet)
+                del ddf
+                return None
+            else:
+                self.df = ddf.compute()
+                return self.df
+        else:
+            beta = np.array(self.genCoefficients())
+            raw = self._X_full
+            y = raw.apply(lambda x: beta.dot(x) + self.rng.gauss(intercept, error), axis = 1)
+            self.df = self._X
+            self.df['y'] = y
+            return self.df
     
-    def __call__(self):
-        df = self.genResponse()
-        return df
+    def __call__(self, parquet_filename = None):
+        if self.use_dask:
+            print(self.dashboard_link)
+        if parquet_filename:
+            self.genResponse(use_dask = self.use_dask, save_parquet = parquet_filename)
+            del self._X
+            return None
+        else:
+            df = self.genResponse(use_dask = self.use_dask)
+            return df
