@@ -2,6 +2,7 @@
 import pandas as pd
 # import scipy
 from scipy.stats import bernoulli
+from scipy.stats import f, ncf
 # import numpy
 import numpy as np
 from numpy.linalg import eig, solve, inv
@@ -9,6 +10,8 @@ from numpy import diag
 # import sklearn
 from sklearn.covariance import EmpiricalCovariance
 from sklearn.datasets import make_gaussian_quantiles
+from sklearn.tree import DecisionTreeRegressor
+
 # import dask
 import dask.dataframe as dd
 import dask.array as da
@@ -74,7 +77,8 @@ def get_order_index(X, by):
             del thres, num, value, total, sorted_eigvec
             INV = inv(selected_eigvec.T.dot(diag(sorted_eig)).dot(selected_eigvec))
             result1 = diag(np.ones(N)) - selected_eigvec.dot(INV).dot(selected_eigvec.T)
-            distance = np.array([result1[:,i].T.dot(result1[:,i]) for i in range(N)])
+            distance = np.array([result1[i,:].T.dot(result1[i,:]) for i in range(N)])
+#             distance = np.array([result1[:,i].T.dot(result1[:,i]) for i in range(N)])
             distance_index = [np.where(distance == x)[0][0] for x in np.sort(distance)]
             return distance_index
 
@@ -113,6 +117,44 @@ class RandomGenerator:
         if self.interaction_size:
             self.addInteractionTerms()
 
+
+    def validateInteractionSize(self, interaction_size):
+        if interaction_size == None:
+            self.interaction_size = self._X.shape[1]
+        elif not isinstance(interaction_size, int):
+            raise ValueError("interaction_size must be an integer")
+        elif interaction_size < 2:
+            print("You don't have an interaction in the linear model statement")
+            self.interaction_size = 0
+        else:
+            self.interaction_size = interaction_size
+
+    def reorder(self, by):
+        columns = self._X.columns[self._X.columns.str.contains('X')]
+        columns2 = self._X.columns[~self._X.columns.str.contains('X')].tolist()
+
+        if (by == None) or (by in ['random','Random','none']):
+            columns = self.rng.sample(columns.tolist(), len(columns))
+            self._X = self._X.loc[:, columns + columns2]
+        else:
+            order = get_order_index(self._X.loc[:, columns], by = by)
+            columns_in_order = columns[order].tolist()
+            self._X = self._X.loc[:, columns_in_order + columns2]
+        return self._X
+    
+    def genBinary(self, order = False, by = 'cov', verbose = False):
+        p = self.varnum
+        prob = [self.rng.uniform(self.prob_range[0], self.prob_range[1]) for x in range(p)]
+        self._config['bernoulli parameters'] = {f"X_{i}" : p for i,p in enumerate(prob)}
+        dictionary = {f"X_{i}":bernoulli.rvs(probability, size = self.N) for i,probability in enumerate(prob) }
+        df = pd.DataFrame(dictionary)
+        if order:
+            df = self.reorder_data(df, by = by)
+            if verbose:
+                print(f"dataset is ordered by {by}")
+        self._X = df.astype(np.byte)
+        return df
+    
     @staticmethod
     def reorder_data(data, by, columns = None):
         if isinstance(data, pd.DataFrame):
@@ -128,32 +170,12 @@ class RandomGenerator:
         else:
             raise ValueError("data must be a pandas dataframe")
         
-    def validateInteractionSize(self, interaction_size):
-        if interaction_size == None:
-            self.interaction_size = self._X.shape[1]
-        elif not isinstance(interaction_size, int):
-            raise ValueError("interaction_size must be an integer")
-        elif interaction_size < 2:
-            print("You don't have an interaction in the linear model statement")
-            self.interaction_size = 0
-        else:
-            self.interaction_size = interaction_size
-
     
-    def genBinary(self, order = False, by = 'cov'):
-        p = self.varnum
-        prob = [self.rng.uniform(self.prob_range[0], self.prob_range[1]) for x in range(p)]
-        self._config['bernoulli parameters'] = {f"X_{i}" : p for i,p in enumerate(prob)}
-        dictionary = {f"X_{i}":bernoulli.rvs(probability, size = self.N) for i,probability in enumerate(prob) }
-        df = pd.DataFrame(dictionary)
-        if order:
-            df = self.reorder_data(df, by = by)
-            print(f"dataset is ordered by {by}")
-        self._X = df.astype(np.byte)
-        return df
+    
     
     @property
     def config(self):
+        self._config['parameter_size'] = self._config['p'] + sum([len(x) for x in self._config['interactions']]) + 1
         pprint(self._config)
     
     
@@ -213,14 +235,9 @@ class RandomGenerator:
                 interaction  = interaction_list[i]
                 p = len(interaction)
                 colname = ''.join(interaction)
-                if self.use_dask:
-                    colnames.append(colname)
-                else:
-                    colnames.append(colname)
-                    df[colname] = df.loc[:, interaction].apply(np.prod, axis = 1)
+                colnames.append(colname)
         self.columns = colnames
-        self._X_full = df
-        return df
+        return colnames
     
     def genCoefficients(self, mean = 2, error = 2):
         columns = self.columns
@@ -233,9 +250,19 @@ class RandomGenerator:
         self._config['coefficients'] = dictionary
         return beta
         
-        
-        
-    def genResponse(self, intercept = 5, error = 5, use_dask = False, save_parquet = None):
+    def genResponse(self, intercept = None, error = None, use_dask = False, save_parquet = None):
+        if intercept == None:
+            intercept = self.rng.uniform(3, 10)
+        if error == None:
+            error = self.rng.uniform(3, 8)
+        try:
+            self._config['coefficients']['intercept'] = intercept
+            self._config['sigma'] = error
+        except:
+            self.genCoefficients()
+            self._config['coefficients']['intercept'] = intercept
+            self._config['sigma'] = error
+            
         if use_dask:
             try:
                 df = self._X
@@ -250,11 +277,7 @@ class RandomGenerator:
             interactions = []
             for val in interaction_dict.values():
                 interactions += val
-            try:
-                coef = self._config['coefficients']
-            except:
-                self.genCoefficients()
-                coef = self._config['coefficients']
+            coef = self._config['coefficients']
                 
             find_y = partial(self.compute_response, coefficients = coef)
             result = ddf.apply(find_y, axis = 1, meta = (None, 'float64'))
@@ -268,6 +291,38 @@ class RandomGenerator:
                 self.df = ddf.compute()
                 return self.df
         else:
+            try:
+                df = self._X
+            except:
+                df = self.genBinary
+            try:
+                interactions = self._interactions
+            except:
+                interactions = self.interactions
+            interaction_dict = interactions
+            interactions = []
+            for val in interaction_dict.values():
+                interactions += val
+            coef = self._config['coefficients']
+                
+            find_y = partial(self.compute_response, coefficients = coef)
+            result = df.apply(find_y, axis = 1)
+            result += np.random.normal(loc = intercept, scale = error, size = df.shape[0])
+            df['y'] = result
+            if save_parquet:
+                df.to_parquet(path=save_parquet)
+                del df
+                return None
+            else:
+                self.df = df
+                return self.df
+            
+            
+            
+            
+            
+            
+            
             beta = np.array(self.genCoefficients())
             raw = self._X_full
             y = raw.apply(lambda x: beta.dot(x) + self.rng.gauss(intercept, error), axis = 1)
@@ -285,3 +340,8 @@ class RandomGenerator:
         else:
             df = self.genResponse(use_dask = self.use_dask)
             return df
+
+        
+        
+        
+        
