@@ -1,5 +1,6 @@
 from sklearn.base import BaseEstimator, clone
 from sklearn.cluster import AgglomerativeClustering
+from sklearn.metrics      import r2_score
 
 import numpy as np; import pandas as pd
 from typing import List, Union
@@ -18,6 +19,7 @@ class one_way_ANOVA(BaseEstimator):
         self.response = (x for x in y)
         self.segment_means = pd.DataFrame(zip(X, y), columns = ['x','y']).groupby(
             'x')['y'].mean()
+        self._rsq = r2_score(y, np.array([self.segment_means.at[x] for x in X]))
         return self
     
     def fit_transform(self, X, y):
@@ -37,13 +39,15 @@ class one_way_ANOVA(BaseEstimator):
         if hasattr(self, '_rsq'):
             return self._rsq
         else:
-            y = np.array(list(self.response))
-            y_pred = np.array(list(self.y_pred))
-            ssto = np.square(y - np.mean(y)).sum()
-            sse  = np.square(y - y_pred).sum()
-            rsq  = (ssto-sse)/ssto
-            self._rsq = rsq
-            return rsq
+            raise AttributeError("fit the estimator first")
+#             y = np.array(list(self.response))
+#             y_pred = np.array(list(self.y_pred))
+#             return r2_score(y, y_pred)
+#             ssto = np.square(y - np.mean(y)).sum()
+#             sse  = np.square(y - y_pred).sum()
+#             rsq  = (ssto-sse)/ssto
+#             self._rsq = rsq
+#             return rsq
         
         
 class ClusteredSegmentation(BaseEstimator):
@@ -59,21 +63,23 @@ class ClusteredSegmentation(BaseEstimator):
             self.n_clusters = rg.config.parameter_size
         else:
             self.n_clusters = n_clusters
-        self.fit_transform(X, y)
+        self.fit(X, y)
+        self.predict(X)
         return self.simulation_result
         
         
     def full_model(self, X: Union[pd.Series, np.ndarray, List], y: Union[pd.Series, np.ndarray, List], return_array = False):
         segment_means = pd.DataFrame(zip(X, y), columns = ['x','y']).groupby('x')['y'].mean()
         self.y_pred_full = (segment_means.at[x] for x in X)
-        ssto = sum((y - np.mean(y))**2)
-        sse  = sum((y - np.array([segment_means.at[x] for x in X]))**2)
-        self.rsq_full = (ssto-sse)/ssto ############################### define rsq_full <<<<<
+        self.rsq_full = r2_score(y, np.array([segment_means.at[x] for x in X]))
+#         ssto = sum((y - np.mean(y))**2)
+#         sse  = sum((y - np.array([segment_means.at[x] for x in X]))**2)
+#         self.rsq_full = (ssto-sse)/ssto ############################### define rsq_full <<<<<
         if return_array:
             return np.array([segment_means.at[x] for x in X])
     
         
-    def fit_transform(self, X: Union[pd.Series, np.ndarray, List], y: Union[pd.Series, np.ndarray, List]):
+    def fit(self, X: Union[pd.Series, np.ndarray, List], y: Union[pd.Series, np.ndarray, List]):
         if isinstance(X, np.ndarray):
             X = X.reshape(-1)
         if isinstance(y, np.ndarray):
@@ -94,9 +100,20 @@ class ClusteredSegmentation(BaseEstimator):
         ).sort_values().reset_index().reset_index().set_index('x')['index']
         
         self.clusterer_.labels_ = np.array([group_id_map.at[x] for x in group_id_raw])
+        self.full_to_reduced = pd.DataFrame(zip(X, self.clusterer_.labels_), columns = ['full','reduced']).groupby('full').agg(pd.Series.mode)
         self.q = np.unique(self.clusterer_.labels_).shape[0] ########### define q <<<<<
-        y_pred = self.regressor_.fit_transform(self.clusterer_.labels_, y)
-        return y_pred
+        self.regressor_.fit(self.clusterer_.labels_, y) # now self.regressor_.segment_means is available
+        return self
+        
+    def predict(self, X: Union[pd.Series, np.ndarray, List]):
+        if hasattr(self, "full_to_reduced"):
+            if isinstance(X, np.ndarray): # if X is ndarray, flatten
+                X = X.reshape(-1)
+            transformed_X = self.full_to_reduced.loc[X,'reduced'] # get the id from the clustering
+            y_pred = self.regressor_.segment_means.loc[transformed_X] # find the corresponding y_hat value for id
+            return y_pred
+        else:
+            raise AttributeError("You must fit the model first")
     
     def set_params(self, **kwargs):
         if 'n_clusters' in kwargs:
@@ -117,7 +134,7 @@ class ClusteredSegmentation(BaseEstimator):
             raise AttributeError("Fit-transform the estimator first")
     
     @property
-    def simulation_result(self, alpha = .05):
+    def tau_metric(self, alpha = .05):
         if hasattr(self, "regressor_"):
             rsq_reduced = self.regressor_.score
             rsq_full    = self.rsq_full
