@@ -28,6 +28,10 @@ import os
 # import numba
 from numba import jit, vectorize, int32, int8
 
+# import utils.py
+from utils import GeneratorConfig
+
+
 @jit
 def dot_product(series, binary):
     output = np.sum(series*binary)
@@ -82,14 +86,6 @@ def get_order_index(X, by):
             distance_index = [np.where(distance == x)[0][0] for x in np.sort(distance)]
             return distance_index
 
-    
-
-
-
-
-
-
-
 
 
 
@@ -97,13 +93,14 @@ def get_order_index(X, by):
 
 
 class RandomGenerator:
-    def __init__(self, p, size, order_by = 'cov', prob_range = (.2, .8), interaction_size = None, use_dask = False):
+    def __init__(self, p, size, order_by = 'cov', prob_range = (.2, .8), interaction_size = None, use_dask = False, verbose = True):
         self.varnum = p
         self.prob_range = prob_range
         self.N = size
         self.rng = random.Random()
         self.numpy_rng = np.random.default_rng()
-        self._config = {'p': p, 'sample size': size, 'interactions': {}}
+        self._config = {'p': p, 'sample_size': size, 'interactions': {}}
+        self.verbose = verbose
         if order_by:
             self.genBinary(order = True, by = order_by)
         else:
@@ -142,10 +139,11 @@ class RandomGenerator:
             self._X = self._X.loc[:, columns_in_order + columns2]
         return self._X
     
-    def genBinary(self, order = False, by = 'cov', verbose = False):
+    def genBinary(self, order = False, by = 'cov'):
         p = self.varnum
+        verbose = self.verbose
         prob = [self.rng.uniform(self.prob_range[0], self.prob_range[1]) for x in range(p)]
-        self._config['bernoulli parameters'] = {f"X_{i}" : p for i,p in enumerate(prob)}
+        self._config['bernoulli_parameters'] = {f"X_{i}" : p for i,p in enumerate(prob)}
         dictionary = {f"X_{i}":bernoulli.rvs(probability, size = self.N) for i,probability in enumerate(prob) }
         df = pd.DataFrame(dictionary)
         if order:
@@ -176,7 +174,7 @@ class RandomGenerator:
     @property
     def config(self):
         self._config['parameter_size'] = self._config['p'] + sum([len(x) for x in self._config['interactions']]) + 1
-        pprint(self._config)
+        return GeneratorConfig(**self._config)
     
     
     @property
@@ -217,6 +215,7 @@ class RandomGenerator:
     
     
     def addInteractionTerms(self, use_dask = False):
+        verbose = self.verbose
         try:
             df = self._X
         except:
@@ -228,14 +227,24 @@ class RandomGenerator:
         interaction_all = list(interactions.values())
         N = len(interaction_all)
         colnames = df.columns.tolist()
-        for k in trange(N, leave = False):
-            interaction_list = interaction_all[k]
-            n = len(interaction_list)
-            for i in trange(n, leave = False):
-                interaction  = interaction_list[i]
-                p = len(interaction)
-                colname = ''.join(interaction)
-                colnames.append(colname)
+        if verbose:
+            for k in trange(N, leave = False):
+                interaction_list = interaction_all[k]
+                n = len(interaction_list)
+                for i in trange(n, leave = False):
+                    interaction  = interaction_list[i]
+                    p = len(interaction)
+                    colname = ''.join(interaction)
+                    colnames.append(colname)
+        else:
+            for k in range(N):
+                interaction_list = interaction_all[k]
+                n = len(interaction_list)
+                for i in range(n):
+                    interaction  = interaction_list[i]
+                    p = len(interaction)
+                    colname = ''.join(interaction)
+                    colnames.append(colname)
         self.columns = colnames
         return colnames
     
