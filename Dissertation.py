@@ -173,7 +173,7 @@ class RandomGenerator:
     
     @property
     def config(self):
-        self._config['parameter_size'] = self._config['p'] + sum([len(x) for x in self._config['interactions']]) + 1
+        self._config['parameter_size'] = self._config['p'] + sum([len(v) for k, v in self._config['interactions'].items()]) + 1
         return GeneratorConfig(**self._config)
     
     

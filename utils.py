@@ -7,7 +7,39 @@ import pandas as pd
 from scipy.optimize import bisect
 from scipy.stats import f, ncf
 from sklearn.tree import DecisionTreeRegressor
+# itertools
+from itertools import combinations, starmap
 
+
+
+
+def get_similar_index(csc_matrix, csc_identity, tol = 1e-3):
+    assert csc_matrix.shape == csc_identity.shape, "The two matrices must be in the same shape"
+    assert csc_matrix.shape[0] == csc_matrix.shape[1], "The matrics must be a square matrices"
+    matched_index = []
+    for i in range(csc_matrix.shape[0]):
+        if np.allclose(csc_matrix.getcol(i).toarray().reshape(-1), csc_identity.getcol(i).toarray().reshape(-1), atol = tol):
+            matched_index.append(i)
+    return matched_index
+
+
+
+def sum_string(*args):
+    string = args[0]
+    for i in range(1, len(args)):
+        string = ''.join([string, args[i]])
+    return string
+
+
+
+
+def expand_var_names(seq:list):
+    index_list = seq.copy()
+    n = len(seq) + 1
+    for i in range(2, n):
+        m = starmap(sum_string, combinations(seq, i))
+        index_list = index_list + list(m)
+    return index_list
 
 
 
