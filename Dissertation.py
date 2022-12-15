@@ -248,7 +248,7 @@ class RandomGenerator:
         self.columns = colnames
         return colnames
     
-    def genCoefficients(self, mean = 2, error = 2):
+    def genCoefficients(self, mean = 2, error = 2): # This later needs a decorator
         columns = self.columns
         num_var = len(columns)
         abs_beta = [abs(self.rng.gauss(mean, error)) for x in range(num_var)]
@@ -268,7 +268,11 @@ class RandomGenerator:
             self._config['coefficients']['intercept'] = intercept
             self._config['sigma'] = error
         except:
-            self.genCoefficients()
+            mean, coef_error = self.rng.uniform(3, 8), self.rng.uniform(3, 8)
+            self.genCoefficients(mean = self.rng.uniform(3, 8), error = coef_error)
+            self._config['coefficient_generator_config'] = {'distribution':'Gauss',
+                                                            'mean' : mean,
+                                                            'error': coef_error}
             self._config['coefficients']['intercept'] = intercept
             self._config['sigma'] = error
             

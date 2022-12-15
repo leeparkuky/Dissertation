@@ -19,7 +19,10 @@ class one_way_ANOVA(BaseEstimator):
         self.response = (x for x in y)
         self.segment_means = pd.DataFrame(zip(X, y), columns = ['x','y']).groupby(
             'x')['y'].mean()
-        self._rsq = r2_score(y, np.array([self.segment_means.at[x] for x in X]))
+        y_pred = np.array([self.segment_means.at[x] for x in X])
+        self._rsq = r2_score(y, y_pred)
+        sse  = np.square(y - y_pred).sum()
+        self.MSE_ = sse/(y.shape[0]-self.segment_means.shape[0])
         return self
     
     def fit_transform(self, X, y):
@@ -40,6 +43,14 @@ class one_way_ANOVA(BaseEstimator):
             return self._rsq
         else:
             raise AttributeError("fit the estimator first")
+    
+    @property
+    def MSE(self):
+        if hasattr(self, "MSE_"):
+            return self.MSE_
+        else:
+            raise AttributeError("fit the estimator first")
+
 #             y = np.array(list(self.response))
 #             y_pred = np.array(list(self.y_pred))
 #             return r2_score(y, y_pred)
@@ -73,7 +84,8 @@ class ClusteredSegmentation(BaseEstimator):
         self.y_pred_full = (segment_means.at[x] for x in X)
         self.rsq_full = r2_score(y, np.array([segment_means.at[x] for x in X]))
 #         ssto = sum((y - np.mean(y))**2)
-#         sse  = sum((y - np.array([segment_means.at[x] for x in X]))**2)
+        sse  = sum((y - np.array([segment_means.at[x] for x in X]))**2)
+        self.mse_full  = sse/(y.shape[0] - segment_means.shape[0])
 #         self.rsq_full = (ssto-sse)/ssto ############################### define rsq_full <<<<<
         if return_array:
             return np.array([segment_means.at[x] for x in X])
@@ -101,6 +113,12 @@ class ClusteredSegmentation(BaseEstimator):
         
         self.clusterer_.labels_ = np.array([group_id_map.at[x] for x in group_id_raw])
         self.full_to_reduced = pd.DataFrame(zip(X, self.clusterer_.labels_), columns = ['full','reduced']).groupby('full').agg(pd.Series.mode)
+        # add counts information
+        full_to_reduced_with_counts = self.full_to_reduced.copy().reset_index() # it adds counts information
+        full_to_reduced_with_counts['counts'] = full_to_reduced_with_counts.full.apply(
+            lambda x: np.where(X.reshape(-1) == x)[0].shape[0])
+        self.full_to_reduced_with_counts = full_to_reduced_with_counts
+
         self.q = np.unique(self.clusterer_.labels_).shape[0] ########### define q <<<<<
         self.regressor_.fit(self.clusterer_.labels_, y) # now self.regressor_.segment_means is available
         return self
@@ -122,7 +140,14 @@ class ClusteredSegmentation(BaseEstimator):
             self.n_clusters = n_clusters
         else:
             raise ValueError("The only parameter for this estimator is 'n_clusters'")
-            
+    
+    @property
+    def MSE(self):
+        if hasattr(self, "regressor_"):
+            return self.regressor_.MSE
+        else:
+            raise AttributeError("Fit-transform the estimator first")
+
     
     
     @property

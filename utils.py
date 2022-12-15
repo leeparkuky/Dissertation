@@ -53,6 +53,7 @@ class GeneratorConfig():
     parameter_size: int
     sample_size: int
     sigma: float
+    coefficient_generator_config: Dict
     
 
 
