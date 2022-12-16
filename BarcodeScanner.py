@@ -12,16 +12,37 @@ import scipy
 from scipy.sparse import vstack, identity, csr_array, vstack, csc_matrix
 from scipy.sparse.linalg import svds, inv
 from scipy.stats import f, ncf
-from scipy.spatial.distance import mahalanobis, euclidean
+from scipy.spatial.distance import mahalanobis, euclidean, jensenshannon
 # sklearn
 from sklearn.metrics import r2_score
 from sklearn.model_selection import train_test_split
-from sklearn.covariance import EmpiricalCovariance
+from sklearn.covariance import EmpiricalCovariance, MinCovDet
 # others
 from tqdm.notebook import trange
 from itertools import combinations, starmap
 from functools import partial
 from typing import List
+from joblib import Parallel, delayed
+
+
+
+
+def check_ones(seq_a, seq_b):
+    return np.all(np.isin(np.where(seq_a ==1)[0], np.where(seq_b ==1)[0]))
+
+def check_zeros(seq_a, seq_b):
+    return np.all(np.isin(np.where(seq_a ==0)[0], np.where(seq_b ==0)[0]))
+
+def check_both(seq_a, seq_b):
+    return check_ones(seq_a, seq_b)*check_zeros(seq_a, seq_b)
+
+def find_prob(missing_array, weighted_mean):
+    return np.prod([1-w if e == 0 else w  for e, w in zip(missing_array, weighted_mean)])
+
+
+
+
+
 
 
 
@@ -45,8 +66,41 @@ class barcodeScanner:
         proj = B.T @ inv(B @ B.T) @ B
     
     
+
+    def find_reduced_jensenshannon(self, missing, all_arrays = None):
+        distance = []
+        if all_arrays:
+            pass
+        else:
+            all_arrays = [self.num_to_barcode(x, scanner.barcode_length).toarray().reshape(-1) for x in range(2**self.barcode_length)]
+        for weighted_means in self.weighted_segment_means:
+            cond = partial(check_both, weighted_means)
+            prob = partial(find_prob, weighted_mean = weighted_means)
+            prob_seq = [prob(x) for x in all_arrays if cond(x)]
+            prob_domain = [x.tolist() for x in all_arrays if cond(x)] if missing.tolist() in [x.tolist() for x in all_arrays if cond(x)] else  [x.tolist() for x in all_arrays if cond(x)] + [missing.tolist()]
+            if len(prob_seq) < len(prob_domain):
+                prob_seq.append(0)
+            missing_prob_seq = [0 for _ in range(len(prob_seq)-1)] + [1]
+            d = jensenshannon(prob_seq, missing_prob_seq)
+            distance.append(d)
+        return distance.index(min(distance))
+
+    def assign_missing_jensenshannon(self, independece = True):   # Need to add lines for when independence = False
+        if hasattr(self, '_segmentation_table_jensenshannon'):
+            pass
+        else:
+            table = self.segmentation_table.copy().drop('counts',axis = 1)
+            all_arrays = [self.num_to_barcode(x, self.barcode_length).toarray().reshape(
+                -1) for x in range(2**self.barcode_length)]
+            reduced = Parallel(n_jobs = -1, verbose = 0)(
+                delayed(self.find_reduced_jensenshannon)(missing, all_arrays) for missing in self.missing_arrays)
+            self._segmentation_table_jensenshannon =  pd.concat([table, pd.DataFrame(zip(self.missing_pairs_decimal_repr, reduced),
+                                                                                     columns = ['full','reduced'])],
+                                                             ignore_index = True).sort_values('full').reset_index(drop = True)
+        return self._segmentation_table_jensenshannon
+        
     
-    def assign_missing_mahalanobis(self, pooled= False):
+    def assign_missing_mahalanobis(self, pooled= False, robust = False):
         if pooled:
             if hasattr(self, '_segmentation_table_mahalanobis_pooled'):
                 pass
@@ -57,8 +111,11 @@ class barcodeScanner:
                     x['full'], self.barcode_length).toarray()[0], axis = 1)
                 X_list = []
                 for barcode, count in zip(table.barcode, table.counts):
-                    X_list += [barcode.tolist() for _ in range(count)]                
-                cov = EmpiricalCovariance()
+                    X_list += [barcode.tolist() for _ in range(count)]  
+                if robust:
+                    cov = MinCovDet()
+                else:
+                    cov = EmpiricalCovariance()
                 cov.fit(X_list)
                 VI = inv(cov.covariance_)
                 reduced = []
@@ -85,7 +142,10 @@ class barcodeScanner:
                     for b, c in zip(r_table.barcode, r_table['counts']):
                         barcodes += [b for _ in range(c)]
                     barcodes = np.concatenate(barcodes).reshape(-1, 10)
-                    cov = EmpiricalCovariance()
+                    if robust:
+                        cov = MinCovDet()
+                    else:
+                        cov = EmpiricalCovariance()
                     cov.fit(barcodes)
                     covs.append(cov)
                     del barcodes
