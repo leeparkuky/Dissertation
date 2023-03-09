@@ -10,6 +10,15 @@ from sklearn.tree import DecisionTreeRegressor
 # itertools
 from itertools import combinations, starmap
 
+def convert_to_int(series, order_index = None):
+    N = len(series)
+    series = np.array(series)
+    if order_index:
+        series = series[order_index]
+    binary = np.array([2**(N-1-i) for i in range(N)])
+#     integer = series.dot(binary.T)
+    integer = dot_product(series, binary)
+    return integer
 
 
 
@@ -199,5 +208,3 @@ class tree_fit_result:
                    "r_squared_reduced": self.rsq_reduced,
                    "tau_estimate": self.tau_est,
                    "tau_lower_bound": self.tau_est_lb}
-    
-

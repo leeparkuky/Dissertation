@@ -1,301 +1,319 @@
-import numpy as np
-import pandas as pd
-# plotting
-import matplotlib.pyplot as plt
-import seaborn as sns
-# custom packages
-from Dissertation import RandomGenerator, convert_to_int, get_order_index
-from utils import *
-from estimators import ClusteredSegmentation
-# scipy
-import scipy
-from scipy.sparse import vstack, identity, csr_array, vstack, csc_matrix
-from scipy.sparse.linalg import svds, inv
-from scipy.stats import f, ncf
-from scipy.spatial.distance import mahalanobis, euclidean, jensenshannon
-# sklearn
-from sklearn.metrics import r2_score
-from sklearn.model_selection import train_test_split
-from sklearn.covariance import EmpiricalCovariance, MinCovDet
-# others
-from tqdm.notebook import trange
-from itertools import combinations, starmap
+#python default packages
+from dataclasses import dataclass
+from itertools import product
 from functools import partial
-from typing import List
+#pandas
+import pandas as pd
+#numpy and scipy
+import numpy as np
+from numpy.linalg import norm, inv
+from scipy.stats import f
+
+# within dissertation2 
+import sample
+import estimators
+#joblib
 from joblib import Parallel, delayed
 
 
 
-
-def check_ones(seq_a, seq_b):
-    return np.all(np.isin(np.where(seq_a ==1)[0], np.where(seq_b ==1)[0]))
-
-def check_zeros(seq_a, seq_b):
-    return np.all(np.isin(np.where(seq_a ==0)[0], np.where(seq_b ==0)[0]))
-
-def check_both(seq_a, seq_b):
-    return check_ones(seq_a, seq_b)*check_zeros(seq_a, seq_b)
-
-def find_prob(missing_array, weighted_mean):
-    return np.prod([1-w if e == 0 else w  for e, w in zip(missing_array, weighted_mean)])
-
-
-
-
-
-
-
-
-class barcodeScanner:
-    def __init__(self, estimator, config):
-        self.config = config
-        self.barcode_length = config.p
-        if hasattr(estimator, "full_to_reduced"):
-            self.segmentation_table = estimator.full_to_reduced_with_counts.copy()
-            self.num_clusters = estimator.n_clusters
-            self.num_parameters_full = self.segmentation_table.shape[0]
-            self.num_missing_pairs = 2**self.barcode_length - self.segmentation_table.shape[0]
-            self.missing_pairs_decimal_repr = list(filter(lambda x: x not in self.segmentation_table.full.values, range(2**self.barcode_length)))
-        else:
-            raise AttributeError("'estimator' must have been fit and have 'full_to_reduced' attribute")
-        self.var_names = [f"X_{i}" for i in range(self.barcode_length)]
-        self.var_names_all = expand_var_names(self.var_names)
+@dataclass
+class cluster_barcode_scanner:
+    sample_generator: sample.sample_generator
+    cluster_estimator: estimators.ClusteredSegmentation
+    multi_processing: bool = True
         
-    def MLEscan(self): # Needs to be edited (After fully investigating the chapter 5)
-        B = vstack([self.raw_contrast, scanner.missingPairsMLE()])
-        proj = B.T @ inv(B @ B.T) @ B
-    
-    
-
-    def find_reduced_jensenshannon(self, missing, all_arrays = None):
-        distance = []
-        if all_arrays:
+    @property
+    def C(self):
+        if hasattr(self, '_C'):
             pass
         else:
-            all_arrays = [self.num_to_barcode(x, scanner.barcode_length).toarray().reshape(-1) for x in range(2**self.barcode_length)]
-        for weighted_means in self.weighted_segment_means:
-            cond = partial(check_both, weighted_means)
-            prob = partial(find_prob, weighted_mean = weighted_means)
-            prob_seq = [prob(x) for x in all_arrays if cond(x)]
-            prob_domain = [x.tolist() for x in all_arrays if cond(x)] if missing.tolist() in [x.tolist() for x in all_arrays if cond(x)] else  [x.tolist() for x in all_arrays if cond(x)] + [missing.tolist()]
-            if len(prob_seq) < len(prob_domain):
-                prob_seq.append(0)
-            missing_prob_seq = [0 for _ in range(len(prob_seq)-1)] + [1]
-            d = jensenshannon(prob_seq, missing_prob_seq)
-            distance.append(d)
-        return distance.index(min(distance))
-
-    def assign_missing_jensenshannon(self, independece = True):   # Need to add lines for when independence = False
-        if hasattr(self, '_segmentation_table_jensenshannon'):
-            pass
-        else:
-            table = self.segmentation_table.copy().drop('counts',axis = 1)
-            all_arrays = [self.num_to_barcode(x, self.barcode_length).toarray().reshape(
-                -1) for x in range(2**self.barcode_length)]
-            reduced = Parallel(n_jobs = -1, verbose = 0)(
-                delayed(self.find_reduced_jensenshannon)(missing, all_arrays) for missing in self.missing_arrays)
-            self._segmentation_table_jensenshannon =  pd.concat([table, pd.DataFrame(zip(self.missing_pairs_decimal_repr, reduced),
-                                                                                     columns = ['full','reduced'])],
-                                                             ignore_index = True).sort_values('full').reset_index(drop = True)
-        return self._segmentation_table_jensenshannon
-        
-    
-    def assign_missing_mahalanobis(self, pooled= False, robust = False):
-        if pooled:
-            if hasattr(self, '_segmentation_table_mahalanobis_pooled'):
-                pass
-            else:
-                from numpy.linalg import inv
-                table = self.segmentation_table.copy() # segmentation_table
-                table['barcode'] = table.apply(lambda x: self.num_to_barcode(
-                    x['full'], self.barcode_length).toarray()[0], axis = 1)
-                X_list = []
-                for barcode, count in zip(table.barcode, table.counts):
-                    X_list += [barcode.tolist() for _ in range(count)]  
-                if robust:
-                    cov = MinCovDet()
+            def gen_contrast(groupby_series, p):
+                if len(groupby_series) == 1:
+                    return None
                 else:
-                    cov = EmpiricalCovariance()
-                cov.fit(X_list)
-                VI = inv(cov.covariance_)
-                reduced = []
-                for missing in self.missing_arrays:
-                    pooled_dist = [mahalanobis(w, missing.reshape(-1), VI) for w in self.weighted_segment_means]
-                    reduced.append(pooled_dist.index(min(pooled_dist)))
-                self._segmentation_table_mahalanobis_pooled = pd.concat(
-                            [table[['full','reduced']], pd.DataFrame(zip(
-                                self.missing_pairs_decimal_repr, reduced), columns = ['full','reduced'])],
-                                    ignore_index=True).sort_values('full').reset_index(drop = True)  
-            return self._segmentation_table_mahalanobis_pooled
-        else:
-            if hasattr(self, '_segmentation_table_mahalanobis'):
-                pass
-            else:
-                table = self.segmentation_table.copy() # segmentation_table
-                table['barcode'] = table.apply(lambda x: self.num_to_barcode(
-                    x['full'], self.barcode_length).toarray()[0], axis = 1)
-                reduced = np.sort(table.reduced.unique())
-                covs = []
-                for r in reduced:
-                    barcodes = []
-                    r_table = table.loc[table.reduced.eq(r), ['barcode','counts']]
-                    for b, c in zip(r_table.barcode, r_table['counts']):
-                        barcodes += [b for _ in range(c)]
-                    barcodes = np.concatenate(barcodes).reshape(-1, 10)
-                    if robust:
-                        cov = MinCovDet()
-                    else:
-                        cov = EmpiricalCovariance()
-                    cov.fit(barcodes)
-                    covs.append(cov)
-                    del barcodes
+                    result = []
+                    for idx, mean_idx in enumerate(groupby_series.values.tolist()):
+                        if idx == 0:
+                            array_1 = np.array([1 if x == mean_idx else 0 for x in range(2**p)])
+                        else:
+                            array_2 = np.array([[1 if x == mean_idx else 0 for x in range(2**p)]])
+                            contrast = (array_1 - array_2).reshape(1, -1)
+                            result.append(contrast)
+                    return np.concatenate(result, axis = 0)
+            result = self.cluster_estimator.full_to_reduced_with_counts.copy()
+            C = np.concatenate([x for x in result.groupby('reduced')['full'].apply(gen_contrast, p = self.sample_generator.p) if x is not None ], axis = 0)
+            self._C = C
+        return self._C
 
 
-                full = []
-                full_to_reduced = []
-                for missing, missing_dec in zip(self.missing_arrays, self.missing_pairs_decimal_repr):
-                    m_dist = [
-                                (r, cov.mahalanobis(missing.reshape(1,-1))[0]) for cov, r in zip(covs, reduced) if (
-                                    cov.covariance_ == 0).mean() < 1]
-                    non_zero_min = min([x  for y, x in m_dist if x>0])
-                    seg_index = [y for x, y in m_dist].index(non_zero_min)
-                    full_to_reduced.append(m_dist[seg_index][0]), full.append(missing_dec)
-                self._segmentation_table_mahalanobis = pd.concat(
-                            [table[['full','reduced']], pd.DataFrame(zip(
-                                full, full_to_reduced), columns = ['full','reduced'])],ignore_index=True).sort_values(
-                            'full').reset_index(drop = True)  
-                del table, covs, cov, full, full_to_reduced, m_dist
-            return self._segmentation_table_mahalanobis
-            
-    
-    
-    
-    
-    
     @property
-    def assign_missing_euclidean(self):
-        if hasattr(self, '_segmentation_table_euclidean'):
+    def L_inv(self):
+        if hasattr(self, '_L_inv'):
             pass
         else:
-            cluster_segments = self.segmentation_table.copy().drop('counts', axis = 1) # segmentation_table
-            reduced = []
-            full = []
-            for missing, missing_dec in zip(self.missing_arrays, self.missing_pairs_decimal_repr):
-                euclidean_distance = [euclidean(x, missing) for x in self.weighted_segment_means ]
-                segment_to_assign = euclidean_distance.index(min(euclidean_distance))
-                del euclidean_distance
-                full.append(missing_dec); reduced.append(segment_to_assign)
-                del segment_to_assign
-            self._segmentation_table_euclidean = pd.concat(
-                [cluster_segments, pd.DataFrame(zip(full, reduced), columns = ['full','reduced'])], 
-                ignore_index = True).sort_values('full').reset_index(drop = True)
-            del cluster_segments, full, reduced
-        return self._segmentation_table_euclidean
-
-    
+            L = self.sample_generator.L
+            self._L_inv = inv(L)
+        return self._L_inv
     
     @property
-    def weighted_segment_means(self):
-        if hasattr(self, '_weighted_means'):
+    def full_var(self):
+        if hasattr(self, '_full_var'):
             pass
         else:
-            table = self.segmentation_table.copy()
-            table['barcode'] = table.apply(lambda x: self.num_to_barcode(x['full'], 10).toarray()[0], axis = 1)
-            self._weighted_means = table[['barcode','counts','reduced']].groupby('reduced', as_index= False).apply(
-                lambda x: np.average(np.concatenate(list(x['barcode'])).reshape(-1, 10), axis = 0, weights = x['counts']))
-            del table
-        return self._weighted_means
+            self._full_var = self.cluster_estimator.full_var
+        return self._full_var
         
-    
-    @property
-    def raw_contrast(self):
-        if hasattr(self, "raw_contrast_"):
-            pass
-        else:
-            result = []
-            for key in self.groupby_expanded_barcode.keys():
-                result.append(self.gen_contrast(self.groupby_expanded_barcode[key]))
-            self.raw_contrast_ = vstack(result)
-            del result
-        return self.raw_contrast_
-
     @staticmethod
-    def gen_contrast(csc_matrix: scipy.sparse._csc.csc_matrix)-> scipy.sparse._csc.csc_matrix:
-        fixed_array = csc_matrix.getrow(0)
-        result = []
-        for i in range(1, csc_matrix.shape[0]):
-            result.append(fixed_array - csc_matrix.getrow(i))
-        if len(result) > 0:
-            return vstack(result)
+    def get_single_distance(beta, L_inv, C, orth = False):
+        """ given a contrast for beta, it computes the normalized mahalanobis distance between 
+        L_inv*beta and I - P_c where P_c is a projection matrix with respect to C"""
+        if isinstance(beta, list):
+            beta = np.array(beta)
+        assert max(beta.shape) == L_inv.shape[1]
+        beta = beta.reshape(-1)
+        ctc_inv = np.linalg.inv(C.dot(C.T))
+        if orth:
+            H = C.T.dot(ctc_inv).dot(C)
         else:
-            return None
+            H = (np.diag(np.ones(max(C.shape))) - C.T.dot(ctc_inv).dot(C))
+        l_inv_b = L_inv.dot(beta)
+        denom = np.array(l_inv_b.dot(l_inv_b))
+        num   = np.array(l_inv_b.T.dot(H).dot(l_inv_b))
+        try:
+            output = num/denom
+            return output
+        except:
+            return 0
     
-
-    @property
-    def groupby_expanded_barcode(self):
-        if hasattr(self, "groupby_expanded_barcode_"):
-            pass
-        else:
-            self.groupby_expanded_barcode_ = self.segmentation_table.groupby('reduced')['full'].apply(self.num_to_expanded_barcode_batch).to_dict()
-        return self.groupby_expanded_barcode_
-    
-    def num_to_expanded_barcode_batch(self, seq):
-        func = partial(self.num_to_barcode, length = self.barcode_length) # using self.num_to_barcode with the barcode_length
-        result = []
-        for num in seq:
-            result.append(func(num))
-        barcode_csc = vstack(result)
-        del result
-        result = []
-        for barcode_array in barcode_csc:
-            result.append(self.expand_barcode(barcode_array))
-        return vstack(result)
-
     @staticmethod
-    def num_to_barcode(i:int, length:int):
-        binary = bin(i)[2:]
-        while len(binary) < length:
-            binary = '0' + binary
-        return csc_matrix([int(x) for x in list(binary)], dtype = np.byte)
+    def get_cdf(beta_contrasts, L_inv, full_var, group_means, N, p):
+        c = beta_contrasts #self.gen_beta_contrasts(beta)
+        assert c.shape[0] <= c.shape[1]
+        LC = L_inv.dot(c.T)
+        mu = LC.T.dot(group_means) #self.cluster_estimator.full_to_reduced_with_counts.y
+        var = LC.T.dot(full_var).dot(LC)
+        f_value = mu.T.dot(inv(var)).dot(mu)/c.shape[0]
+        cdf = f.cdf(f_value, c.shape[0], N-p, loc=0, scale=1)
+        return cdf    
+    
     
     @property
-    def missing_arrays(self):
-        if hasattr(self, '_missing_arrays'):
+    def cdf_table(self):
+        if hasattr(self, '_cdf_table'):
             pass
         else:
-            missing_pairs_dec = self.missing_pairs_decimal_repr
-            missing_arrays = [self.num_to_barcode(x, self.barcode_length).toarray().reshape(-1) for x in missing_pairs_dec]
-            self._missing_arrays = missing_arrays
-        return self._missing_arrays
-
-    
-    
-    
-    def expand_barcode(self, barcode):
-        ones_index_main = [f'X_{i}' for i in barcode.nonzero()[1]]
-        ones_index = ones_index_main.copy()
-        n = len(ones_index_main)+1
-        for i in range(2, n):
-            m = starmap(sum_string, combinations(ones_index_main, i))
-            ones_index = ones_index + list(m)
-        col = np.array([self.var_names_all.index(index)+1 for index in ones_index])
-        col = np.insert(col, 0, 0)
-        row = np.zeros((len(col),), dtype = np.byte)
-        data = np.ones((len(col),), dtype = np.byte)
-        csr_result = csr_array((data, (row, col)), shape=(1, 2**self.barcode_length))
-        return csc_matrix(csr_result, dtype = np.byte)
-    
-    def missingPairsMLE(self):
-        if self.num_missing_pairs > 0:  
-            self.null_space_size = 2**self.barcode_length - self.num_clusters
-            missing_pairs_expanded = self.num_to_expanded_barcode_batch(self.missing_pairs_decimal_repr)
-            result = []
-            for array in missing_pairs_expanded:
-                max_index = array.nonzero()[1].max()
-                col = np.array([max_index])
-                row = np.zeros((1,), dtype = np.byte)
-                data = np.ones((1,), dtype = np.byte)
-                result.append(csc_matrix((data, (row, col)), shape=(1, 2**self.barcode_length)))
-            return vstack(result)
+            all_beta = self.all_available_beta_for_test
+            L_inv = self.L_inv
+            full_var = self.full_var
+            # fill the missing grouping
+            # This part needs to be replaced with alternative methods flling the missing barcode
+            # we used the overall mean to impute the missing groups mean
+            if self.cluster_estimator.full_to_reduced_with_counts.shape[0] < self.cluster_estimator.full_p:
+                max_group_id = self.cluster_estimator.full_to_reduced_with_counts.reduced.max()
+                df = pd.DataFrame(range(self.cluster_estimator.full_p), columns = ['full'])
+                df = df.merge(self.cluster_estimator.full_to_reduced_with_counts, how = 'left')
+                df.counts.fillna(0, inplace = True); df.reduced.fillna(max_group_id + 1, inplace = True)
+                df.y.fillna(self.cluster_estimator.overall_mean, inplace = True)
+            else:
+                df = self.cluster_estimator.full_to_reduced_with_counts
+            self.cp = df
+            group_means = df.y
+            N = self.cluster_estimator.n
+            p = self.cluster_estimator.full_p
+            
+            if self.multi_processing:
+                cdf_func = partial(self.get_cdf, L_inv = L_inv, full_var = full_var, group_means = group_means,
+                                   N = N, p = p)
+                cdf = Parallel(n_jobs = -1, prefer = 'threads')(delayed(cdf_func)(self.gen_beta_contrasts(beta)) for beta in all_beta)
+            else:
+                cdf = []
+                for beta in all_beta:
+                    c = self.gen_beta_contrasts(beta)
+                    cdf_value = self.get_cdf(c, L_inv, full_var, group_means, N, p)
+                    cdf.append(cdf_value)
+            df_list = []
+            for beta, p_val in zip(all_beta, cdf):
+                seq = list(beta) + [p_val]
+                df_list.append(seq)
+            df = pd.DataFrame(df_list, columns = self.sample_generator.beta_names + ['cdf'])
+            columns = df.columns[df.columns.str.contains('\*')].tolist() + ['cdf']
+            df = df.loc[:, columns].sort_values(['cdf'], ascending = False).reset_index(drop = True)
+            df.cdf.fillna(0, inplace = True)
+            self._cdf_table = df
+        return self._cdf_table
+        
+        
+    @property
+    def cdf_ranking(self):
+        if hasattr(self, '_cdf_ranking'):
+            pass
         else:
-            return None
+            df = self.cdf_table
+            df = df.loc[df.cdf.gt(0), :].reset_index(drop = True)
+            result = df.apply(np.average, weights = df.cdf, axis = 0).sort_values(ascending = False)
+            result.pop('cdf')
+            ranking = pd.DataFrame(zip(result.index.tolist(), result), columns = ['coefficients', 'score'])
+            ranking['ranking'] = ranking.score.rank(ascending = False, method = 'min')
+            self._cdf_ranking = ranking
+            del result, ranking
+        return self._cdf_ranking
+    
+    @property
+    def distance_table(self):
+        if hasattr(self, '_distance_table'):
+            pass
+        else:
+            all_beta = self.all_available_beta_for_test
+#             avg_distance = []
+            def return_distance(beta, L_inv, C):
+                beta = self.gen_beta_contrasts(beta)
+                dist = []
+                for c in beta:
+                    dist.append(self.get_single_distance(c, L_inv, C))
+                return np.mean(dist)
+            
+            def gen_C_distance(all_beta, orth = False):
+                distance = partial(return_distance, L_inv = self.L_inv, C = self.C)
+                ###################################################################################################
+                if self.multi_processing:
+                    avg_distance = Parallel(n_jobs=-1, prefer = 'threads')(delayed(distance)(beta) for beta in all_beta) 
+                else:
+                    avg_distance = []
+                    for beta in all_beta:
+                        dist = []
+                        beta = self.gen_beta_contrasts(beta)
+                        for c in beta:
+                            dist.append(self.get_single_distance(c, self.L_inv, self.C, orth = orth))
+                        avg_distance.append(np.mean(dist))
+                return avg_distance
+            avg_distance = gen_C_distance(all_beta)
+            df_list = []
+            for beta, dist in zip(all_beta, avg_distance):
+                seq = list(beta) + [dist]
+                df_list.append(seq)
+            df = pd.DataFrame(df_list, columns = self.sample_generator.beta_names + ['distance'])
+            columns = df.columns[df.columns.str.contains('\*')].tolist() + ['distance']
+            df = df.loc[:, columns].sort_values(['distance'], ascending = False).reset_index(drop = True)
+            try:
+                base_line = df.loc[df.sum(axis = 1)-df.distance == 0,'distance'].values[0]
+#             base_line_2 = df.loc[df.sum(axis = 1)-df.distance == 0, 'orth_dist'].values[0]
+                if df.distance.gt(base_line).sum():
+                    self._distance_table = df.loc[df.distance.gt(base_line),:]
+                else:
+                    self._distance_table = df #if all the distance is less than the base_line, return first 25%
+            except:
+                self._distance_table = df
+            del df, df_list, avg_distance, seq
+        return self._distance_table
+    
+    
+    def get_distance_ranking(self, percentile = .75, normalize = True):
+        if (1-percentile)*self.distance_table.shape[0] <2:
+            N = 2 # at least two lines
+        else:
+            N = int((1-percentile)*self.distance_table.shape[0])
+        df = self.distance_table
+        new_df = df.copy()
+        prop = 1-percentile
+        weights_seq = new_df.distance[:N]
+        if normalize:
+            self._weights = (weights_seq - weights_seq.min() + 1e-3)/weights_seq.std()
+        else:
+            self._weights = weights_seq
+        avg = partial(np.average, weights = self._weights)
+        if prop == 1:
+            result = new_df
+        result = new_df.iloc[:N,:].apply(avg, axis = 0).sort_values(ascending = False)
+        result.pop('distance')
+        ranking = pd.DataFrame(zip(result.index.tolist(), result), columns = ['coefficients', 'proportion'])
+        ranking['ranking'] = ranking.proportion.rank(ascending = False, method = 'min')
+        return ranking
+        
+    def set_beta_sum_range(self, low = None, high = None):
+        if low:
+            assert low > 0
+        else:
+            low = 1
+        if high:
+            assert high < 2**self.sample_generator.p - self.sample_generator.p
+        else:
+            high = 4
+        self._beta_sum_range = (low, high)
+        return self._beta_sum_range
+        
+        
+    @property
+    def beta_sum_range(self):
+        if hasattr(self, '_beta_sum_range'):
+            pass
+        else:
+            self._beta_sum_range = self.set_beta_sum_range()
+        return self._beta_sum_range
+
+    @property
+    def all_available_beta_for_test(self):
+        if hasattr(self, '_all_available_beta_for_test'):
+            pass
+        else:
+            non_zero_part = product([0,1], repeat = 2**self.sample_generator.p - self.sample_generator.p - 1)
+            zeros = [0] + [0 for _ in range(self.sample_generator.p)]
+            if hasattr(self, '_beta_sum_range'):
+                beta_range = list(range(self.beta_sum_range[0], self.beta_sum_range[1]+1))
+                self._all_available_beta_for_test = np.array([zeros + list(x) for x in non_zero_part if sum(x) in beta_range ]) #if sum(x)
+            else:
+                self._all_available_beta_for_test = np.array([zeros + list(x) for x in non_zero_part if sum(x)]) #if sum(x)
+        return self._all_available_beta_for_test
+    
+   
+    
+    @property
+    def all_distance(self): # this part needs to be done in multi-processing fashion later...
+        if hasattr(self, '_all_distance'):
+            pass
+        else:
+            from scipy.linalg import svd
+            all_beta = self.all_available_beta_for_test
+            avg_distance = []
+            for beta in all_beta:
+                dist = []
+                k = sum(beta)
+                beta = self.gen_beta_contrasts(beta)
+                orths = svd(beta.T)[0][:, :k].T
+                for c in orths:
+                    dist.append(self.get_single_distance(c, scanner.L_inv, scanner.C))
+                avg_distance.append(np.mean(dist))
+            df_list = []
+            for beta, dist in zip(all_beta, avg_distance):
+                seq = list(beta) + [dist]
+                df_list.append(seq)
+            self._all_distance = pd.DataFrame(df_list) # need to add columns
+        return self._all_distance
+    
+    
+    
+    def gen_beta_contrasts(self, beta):
+        if isinstance(beta, list):
+            beta = np.array(beta)
+        beta = beta.reshape(-1)
+        assert beta.shape[0] == 2**self.sample_generator.p
+        assert beta.max() == 1
+        where_ones= np.where(beta)[0]
+        if where_ones.shape[0] == 1:
+            return beta.reshape(1, -1)
+        else:
+            N = 2**self.sample_generator.p
+            contrasts = []
+            for idx, beta_idx in enumerate(where_ones):
+                if idx:
+                    c_compare = np.zeros(N, dtype = np.byte).reshape(1, -1); c_compare[0,beta_idx] = 1
+                    c = c_base - c_compare
+                    contrasts.append(c/norm(c, 2))
+                    c_base = c.copy(); c_base[0, c_base_index ] += 1
+                else:
+                    c_base = np.zeros(N, dtype = np.byte).reshape(1, -1)
+                    c_base[0,beta_idx] = 1
+                    contrasts.append(c_base)
+                    c_base_index = beta_idx
+            contrasts = np.concatenate(contrasts, axis = 0)
+            return contrasts

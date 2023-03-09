@@ -1,0 +1,4 @@
+What to do: 
+- the projection matrix should be created using the means and sample_size
+- use sparse matrix to boost up the speeds
+- missing variables?
